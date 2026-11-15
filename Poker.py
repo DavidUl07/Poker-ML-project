@@ -13,7 +13,7 @@ class Player(object):
         self.name = "Player" + name
         self.chipcount = 10000
         self.hand = []
-        self.status = 10
+        self.status = (10, ())
         self.bet_this_round = 0
         self.folded = False
         self.all_in = False
@@ -31,9 +31,7 @@ def DealRiver():
     deck.remove(current_card)
 
 def CheckPlayerBust():
-    for player in players:
-        if player.chipcount == 0:
-            players.remove(player)
+    players[:] = [p for p in players if p.chipcount > 0]
 
 
 def get_hand_status(cards):
@@ -42,35 +40,46 @@ def get_hand_status(cards):
     groups = sorted(counts.values(), reverse=True)
     is_flush = len({card.symbol for card in cards}) == 1
     unique_values = sorted(counts)
+    is_wheel = unique_values == [2, 3, 4, 5, 14]
     is_straight = len(unique_values) == 5 and (
-        unique_values[-1] - unique_values[0] == 4
-        or unique_values == [2, 3, 4, 5, 14]
+        unique_values[-1] - unique_values[0] == 4 or is_wheel
     )
 
-    if is_straight and is_flush:
-            return 1 if unique_values[-1] == 14 and unique_values[0] == 10 else 2
-    if groups[0] == 4:
-        return 3
-    if groups == [3, 2]:
-        return 4
-    if is_flush:
-        return 5
-    if is_straight:
-        return 6
-    if groups[0] == 3:
-        return 7
-    if groups == [2, 2, 1]:
-        return 8
-    if groups[0] == 2:
-        return 9
-    return 10
+    # Order by group size first, then by card value
+    # (e.g. full house 9-9-9-4-4 -> [9, 4]; two pair K-K-7-7-2 -> [13, 7, 2])
+    ordered = sorted(counts, key=lambda v: (counts[v], v), reverse=True)
 
-def CheckWinner():
-    winner = players[0]
-    for player in players[1:]:
-        if player.status < winner.status and not player.folded:
-            winner = player
-    return winner
+    # The wheel (A-2-3-4-5) is a 5-high straight, not ace-high
+    if is_wheel:
+        ordered = [5, 4, 3, 2, 1]
+
+    tiebreak = tuple(-v for v in ordered)
+
+    if is_straight and is_flush:
+        category = 1 if unique_values[-1] == 14 and unique_values[0] == 10 else 2
+    elif groups[0] == 4:
+        category = 3
+    elif groups == [3, 2]:
+        category = 4
+    elif is_flush:
+        category = 5
+    elif is_straight:
+        category = 6
+    elif groups[0] == 3:
+        category = 7
+    elif groups == [2, 2, 1]:
+        category = 8
+    elif groups[0] == 2:
+        category = 9
+    else:
+        category = 10
+
+    return (category, tiebreak)
+
+def CheckWinners():
+    contenders = [p for p in players if not p.folded]
+    best = min(p.status for p in contenders)
+    return [p for p in contenders if p.status == best]
 
 def BettingRound():
     global pot
@@ -150,12 +159,64 @@ def BotDecision(player, call_amount, current_bet):
 
     return random.choice(actions)
 
+def RotateSeats():
+    players.append(players.pop(0))
+
 
 #Start of the game Setting up all the players at the Table
 
 for i in range(playerNum):
     players.append(Player(str(i+1)))
 
+
+def TestFairness(hands=10000):
+    global pot, deck
+
+    wins = {p.name: 0 for p in players}
+    ties = {p.name: 0 for p in players}
+
+    for _ in range(hands):
+        pot = 0
+        river.clear()
+        deck = baseDeck.copy()
+
+        for player in players:
+            player.hand.clear()
+            player.chipcount = 10000   # reset so nobody busts
+            player.folded = False
+            player.all_in = False
+            player.bet_this_round = 0
+
+        RotateSeats()
+        DealFirstCards()
+        BettingRound()
+        for _ in range(3):
+            DealRiver()
+        BettingRound()
+        DealRiver()
+        BettingRound()
+        DealRiver()
+        for player in players:
+            cards = player.hand + river
+            player.status = min(get_hand_status(h) for h in combinations(cards, 5))
+        BettingRound()
+
+        winners = CheckWinners()
+        for w in winners:
+            if len(winners) == 1:
+                wins[w.name] += 1
+            else:
+                ties[w.name] += 1
+
+    return wins, ties
+
+"""
+wins, ties = TestFairness(10000)
+print("Outright wins:", wins)
+print("Split pots:   ", ties)
+
+Unmark this if you want to check fairness for 10000 hands statistically
+"""
 
 while len(players) > 1:
     pot = 0
@@ -182,9 +243,11 @@ while len(players) > 1:
     BettingRound()
     #for player in players:
         #print(f"{player.name} has a hand status of {player.status} with cards: {[f'{card.number} of {card.symbol}' for card in player.hand]} and river: {[f'{card.number} of {card.symbol}' for card in river]}")
-    winner = CheckWinner()
-    #print(f"{winner.name} wins!")
-    winner.chipcount += pot
+    winners = CheckWinners()
+    share, remainder = divmod(pot, len(winners))
+    for w in winners:
+        w.chipcount += share
+    winners[0].chipcount += remainder  # odd chips go to the first winner
     CheckPlayerBust()
 
 for player in players:
